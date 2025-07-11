@@ -1,0 +1,196 @@
+blueprint:
+  name: Dynamic microinverter regulator/limiter
+  description: >
+    Automatically regulates the AC power limit of a microinverter based on:
+
+    - Target AC output
+    - Actual AC output
+    - Actual DC power per channel
+
+    Ideal for microinverters (e.g., Hoymiles with multiple MPPT trackers) to improve overall output by dynamically adjusting the power limit to go beyond the static limit
+
+  domain: automation
+
+  input:
+    ac_output:
+      name: Inverter AC output [W]
+      selector:
+        entity:
+          domain: sensor
+
+    inverter_ac_limit:
+      name: Inverter AC limit (absolute) [W]
+      selector:
+        entity:
+          domain: number
+
+    dc_channels:
+      name: DC channels [W]
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+
+    target_ac_output:
+      name: Target AC output [W]
+      selector:
+        entity:
+          domain: input_number
+
+    range_min:
+      name: Lower control limit
+      default: 0
+      selector:
+        number:
+          min: 0
+          unit_of_measurement: W
+          mode: box
+
+    range_max:
+      name: Upper control limit (=limit of microinverter)
+      default: 600
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: W
+          mode: box
+
+    hysteresis:
+      name: Hysteresis (W)
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 5
+
+    timer_entity:
+      name: Timer (delay after setting new value)
+      selector:
+        entity:
+          domain: timer
+
+trigger:
+  - platform: state
+    entity_id: !input ac_output
+
+variables:
+  ac_output_entity: !input ac_output
+  inverter_ac_limit_entity: !input inverter_ac_limit
+  dc_channels_entity: !input dc_channels
+  target_ac_output_entity: !input target_ac_output
+  range_min: !input range_min
+  range_max: !input range_max
+  hysteresis: !input hysteresis
+
+  actual_output: "{{ states(ac_output_entity) | float(0) }}"
+  target_output: "{{ states(target_ac_output_entity) | float(0) }}"
+  actual_limit: "{{ states(inverter_ac_limit_entity) | float(0) }}"
+
+  channels_dc: >
+    {% set dc_list = namespace(values=[]) %}
+    {% for sensor in dc_channels_entity %}
+      {% set value = states(sensor) | float(0) %}
+      {% set dc_list.values = dc_list.values + [value] %}
+    {% endfor %}
+    {{ dc_list.values }}
+
+  count_dc_channels: "{{ channels_dc | length }}"
+  total_dc: "{{ channels_dc | sum }}"
+
+  efficiency: >
+    {% if total_dc > actual_limit %}
+      {{ actual_output / total_dc }}
+    {% else %}
+      0.95
+    {% endif %}
+
+  dc_limit_total_calculated: "{{ actual_limit / efficiency if efficiency > 0 else 0 }}"
+  dc_limit_per_channel: "{{ dc_limit_total_calculated / count_dc_channels if count_dc_channels > 0 else 0 }}"
+
+  limited_channel_flags: >
+    {% set flags = namespace(liste=[]) %}
+    {% for value in channels_dc %}
+      {% set flags.liste = flags.liste + [value >= (dc_limit_per_channel * 0.96)] %}
+    {% endfor %}
+    {{ flags.liste }}
+
+  count_limited_channels: "{{ limited_channel_flags | select('equalto', true) | list | length }}"
+  has_limited_channels: "{{ count_limited_channels > 0 }}"
+
+  dc_power_unlimited_channels: >
+    {% set total = namespace(sum=0) %}
+    {% for i in range(count_dc_channels) %}
+      {% if not limited_channel_flags[i] %}
+        {% set total.sum = total.sum + channels_dc[i] %}
+      {% endif %}
+    {% endfor %}
+    {{ total.sum }}
+
+  target_dc: "{{ target_output / efficiency }}"
+  diff2target_dc: "{{ target_dc - total_dc }}"
+
+  delta: "{{ target_output - actual_output }}"
+
+  new_power_dc: >
+    {% set total = namespace(sum=0) %}
+    {% for i in range(count_dc_channels) %}
+      {% if limited_channel_flags[i] %}
+        {% set total.sum = total.sum + dc_limit_per_channel + (diff2target_dc*count_dc_channels)/count_limited_channels %}
+      {% else %}
+        {% set total.sum = total.sum + dc_limit_per_channel %}
+      {% endif %}
+    {% endfor %}
+    {{ total.sum }}
+
+
+  set_limit: >
+    {{ [ [new_power_dc - hysteresis/2, range_min] | max, range_max ] | min | round(0) }}
+
+condition:
+  # Do nothing if actual output is below 25% of lower range
+  - condition: template
+    value_template: >
+      {{ actual_limit >= (range_min * 0.25) }}
+
+  - condition: or
+    conditions:
+      # Needs adjustment and the timer is not active
+      - condition: and
+        conditions:
+          - condition: template
+            value_template: >
+              {{ actual_limit > 0 and (delta | abs) > hysteresis }}
+          - condition: state
+            entity_id: !input timer_entity
+            state: "idle"
+
+      # Adjust immediatly as actual value is exceeding twice the hysteresis
+      - condition: template
+        value_template: >
+          {{ (delta | abs) > (2 * hysteresis) }}
+
+action:
+  - service: number.set_value
+    target:
+      entity_id: !input inverter_ac_limit
+    data:
+      value: "{{ set_limit }}"
+
+  - service: logbook.log
+    data:
+      name: "Microinverter regulator"
+      message: >
+        New limit set: {{ set_limit }} W
+        (AC now: {{ actual_output | round(1) }} W,
+        Target: {{ target_output | round(1) }} W,
+        Delta: {{ delta | round(1) }} W,
+        Channels limiter flags: {{ limited_channel_flags }},
+        Efficiency: {{ (efficiency * 100) | round(2) }} %)
+
+  - service: timer.start
+    target:
+      entity_id: !input timer_entity
+
+mode: single
