@@ -112,7 +112,7 @@ variables:
   limited_channel_flags: >
     {% set flags = namespace(liste=[]) %}
     {% for value in channels_dc %}
-      {% set flags.liste = flags.liste + [value >= (dc_limit_per_channel * 0.96)] %}
+      {% set flags.liste = flags.liste + [value >= (dc_limit_per_channel * 0.95)] %}
     {% endfor %}
     {{ flags.liste }}
 
@@ -136,17 +136,28 @@ variables:
   new_power_dc: >
     {% set total = namespace(sum=0) %}
     {% for i in range(count_dc_channels) %}
-      {% if limited_channel_flags[i] %}
-        {% set total.sum = total.sum + dc_limit_per_channel + (diff2target_dc*count_dc_channels)/count_limited_channels %}
+      {% if limited_channel_flags[i] and count_limited_channels > 0 %}
+        {% set total.sum = total.sum + dc_limit_per_channel + diff2target_dc/count_limited_channels %}
       {% else %}
         {% set total.sum = total.sum + dc_limit_per_channel %}
       {% endif %}
     {% endfor %}
     {{ total.sum }}
 
+  new_power_dc_safe: >-
+      {% if actual_output > (target_output * 1.1) %}
+        {{ range_min }}
+      {% elif count_limited_channels == count_dc_channels %}
+        {{ target_dc }}
+      {% elif (new_power_dc > dc_limit_total_calculated and delta > 0) 
+             or (new_power_dc < dc_limit_total_calculated and delta < 0) %}
+        {{ new_power_dc }}
+      {% else %}
+        {{ dc_limit_total_calculated }}
+      {% endif %}
 
   set_limit: >
-    {{ [ [new_power_dc - hysteresis/2, range_min] | max, range_max ] | min | round(0) }}
+    {{ [ [new_power_dc_safe*efficiency - hysteresis/2, range_min] | max, range_max ] | min | round(0) }}
 
 condition:
   # Do nothing if actual output is below 25% of lower range
@@ -187,7 +198,9 @@ action:
         Target: {{ target_output | round(1) }} W,
         Delta: {{ delta | round(1) }} W,
         Channels limiter flags: {{ limited_channel_flags }},
-        Efficiency: {{ (efficiency * 100) | round(2) }} %)
+        Efficiency: {{ (efficiency * 100) | round(2) }} %),
+        Debug: new_power_dc: {{ new_power_dc | round(0)}} W, new_power_dc_safe: {{ new_power_dc_safe | round(0)}} W, 
+        dc_power_unlimited_channels: {{ dc_power_unlimited_channels | round(0)}} W, dc_limit_per_channel: {{ dc_limit_per_channel | round(0)}} W, , diff2target_dc/count_limited_channels: {{ diff2target_dc/count_limited_channels | round(0)}} W
 
   - service: timer.start
     target:
