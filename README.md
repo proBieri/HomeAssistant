@@ -30,9 +30,9 @@ After importing, go to **Automations** and click **Add Automation → Start with
 
 ## 📦 Available Blueprints
 
-| Name                                 | Description                                                         |
-|--------------------------------------|---------------------------------------------------------------------|
-| generic_microinverter_regulator.yaml | Optimize power limit for microinverters with multiple mppt trackers |
+| Name                                                                                                                                                     | Description                                                         |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
+| [generic_microinverter_regulator](https://github.com/proBieri/HomeAssistant/blob/main/blueprints/automation/probieri/generic_microinverter_regulator.md) | Optimize power limit for microinverters with multiple mppt trackers |
 
 > *Feel free to contribute improvements or request new blueprints!*
 
